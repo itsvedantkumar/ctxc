@@ -40,7 +40,14 @@ check "--exclude drops md" 1 "$c"
 $CTXC $FX --budget 10 --json >/dev/null 2>"$FX.out"
 grep -q "budget reached" "$FX.out" && check "budget note emitted" 1 1 || check "budget note emitted" 0 1
 j=$($CTXC $FX --json)
-printf '%s' "$j" | grep -q '"tool":"ctxc"'      && check "json has tool"    1 1 || check "json has tool" 0 1
+printf '%s' "$j" | grep -q '"binaries":"excluded"' && check "json binaries excluded" 1 1 || check "json binaries excluded" 0 1
+
+# binary skip: fixture PNG is skipped by default, kept with --include-binaries
+mkdir -p "$FX/assets"
+printf '\x89PNG\r\n\x00\x1a\n rest' > "$FX/assets/logo.png"
+$CTXC $FX --list | grep -q "logo.png" && check "binary skipped by default" 0 1 || check "binary skipped by default" 1 1
+$CTXC $FX --include-binaries --list | grep -q "logo.png" && check "--include-binaries keeps png" 1 1 || check "--include-binaries keeps png" 0 1
+rm -rf "$FX/assets"
 printf '%s' "$j" | grep -q '"files":'          && check "json has files"   1 1 || check "json has files" 0 1
 printf '%s' "$j" | grep -q '"est_tokens":[0-9]' && check "json has tokens" 1 1 || check "json has tokens" 0 1
 
