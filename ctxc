@@ -2,7 +2,7 @@
 # ctxc — compile a repository into a token-budgeted context pack for local LLMs.
 set -u
 
-CTXC_VERSION="0.3.0"
+CTXC_VERSION="0.4.0"
 CTXC_MODEL="${CTXC_MODEL:-qwen2.5-coder:7b}"
 CTXC_BUDGET="${CTXC_BUDGET:-8192}"
 
@@ -24,6 +24,8 @@ usage: ctxc [path] [options]
   --json          emit machine-readable pack metadata
   --list          list files that would be packed, then exit
   --no-ignore     do not respect .gitignore
+  --include-binaries
+                  keep files containing NUL bytes (default: skip them)
   -h, --help
 
 The pack is written to stdout; everything else goes to stderr.
@@ -55,6 +57,7 @@ MAX_BYTES=65536
 JSON_OUT=0
 LIST_ONLY=0
 NO_IGNORE=0
+BINARY_MODE=0
 INCLUDES=()
 EXCLUDES=()
 
@@ -68,6 +71,7 @@ while [ $# -gt 0 ]; do
     --json)     JSON_OUT=1; shift ;;
     --list)     LIST_ONLY=1; shift ;;
     --no-ignore) NO_IGNORE=1; shift ;;
+    --include-binaries) BINARY_MODE=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     -*)         die "unknown flag: $1" ;;
     *)          TARGET="$1"; shift ;;
@@ -117,10 +121,22 @@ done
 [ ${#FILTERED[@]} -gt 0 ] || die "include/exclude filters removed every file"
 
 # ---- token budgeting ----------------------------------------------------------
+# has a NUL byte in the first 8KB -> binary, unless opted in
+is_binary() {
+  local f="$1" nb na
+  nb=$(head -c 8192 "$CTXC_ROOT/$f" | wc -c | tr -d ' ')
+  na=$(head -c 8192 "$CTXC_ROOT/$f" | LC_ALL=C tr -d '\0' | wc -c | tr -d ' ')
+  [ "$na" -ne "$nb" ]
+}
+
 declare -a PACKED=()
 total=0
 for f in "${FILTERED[@]}"; do
   [ "$(wc -c <"$CTXC_ROOT/$f" | tr -d ' ')" -le "$MAX_BYTES" ] || continue
+  if [ "$BINARY_MODE" -eq 0 ] && is_binary "$f"; then
+    say "note: skipped binary $f (use --include-binaries)"
+    continue
+  fi
   t=$(est_tokens "$CTXC_ROOT/$f")
   if [ "$total" -eq 0 ]; then
     PACKED+=("$f"); total=$t
@@ -138,8 +154,10 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-manifest=$(printf '{"tool":"ctxc","version":"%s","model":"%s","budget":%s,"files":%s,"est_tokens":%s}' \
-  "$CTXC_VERSION" "$CTXC_MODEL" "$CTXC_BUDGET" ${#PACKED[@]} "$total")
+manifest=$(printf '{"tool":"ctxc","version":"%s","model":"%s","budget":%s,"binaries":"%s","files":%s,"est_tokens":%s}' \
+  "$CTXC_VERSION" "$CTXC_MODEL" "$CTXC_BUDGET" \
+  "$([ "$BINARY_MODE" -eq 1 ] && echo included || echo excluded)" \
+  ${#PACKED[@]} "$total")
 
 if [ "$JSON_OUT" -eq 1 ]; then
   printf '%s\n' "$manifest"
