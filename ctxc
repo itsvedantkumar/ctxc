@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ctxc — compile a repository into a token-budgeted context pack for local LLMs.
+set -u
+
+CTXC_VERSION="0.3.0"
+CTXC_MODEL="${CTXC_MODEL:-qwen2.5-coder:7b}"
+CTXC_BUDGET="${CTXC_BUDGET:-8192}"
+
+die()  { printf 'ctxc: %s\n' "$1" >&2; exit 2; }
+say()  { printf '%s\n' "$1" >&2; }
+
+usage() {
+  cat <<EOF
+ctxc $CTXC_VERSION — compile a repository into a context pack for local models
+
+usage: ctxc [path] [options]
+
+  path            repo or directory to pack (default: .)
+  --model NAME    model name written into the manifest (default: $CTXC_MODEL)
+  --budget N      token budget for the pack (default: $CTXC_BUDGET)
+  --max-bytes N   skip files larger than this (default: 65536)
+  --include PAT   extra glob to include (repeatable)
+  --exclude PAT   glob to exclude, wins over include (repeatable)
+  --json          emit machine-readable pack metadata
+  --list          list files that would be packed, then exit
+  --no-ignore     do not respect .gitignore
+  -h, --help
+
+The pack is written to stdout; everything else goes to stderr.
+Model context budgets: qwen2.5-coder:7b 32k, llama3.1:8b 128k, phi3:mini 4k.
+EOF
+}
+
+# 4.0 chars/token for code-heavy text; crude but deterministic.
+est_tokens() { local chars; chars=$(wc -c <"$1" | tr -d ' '); echo $((chars / 4)); }
+
+path_included() {
+  local p="$1"
+  case "$p" in
+    */.git/*|*/node_modules/*|*/dist/*|*/build/*|*/.venv/*|*/__pycache__/*) return 1 ;;
+  esac
+  return 0
+}
+
+gitignored() {
+  command -v git >/dev/null 2>&1 || return 1
+  git -C "$CTXC_ROOT" check-ignore -q -- "$1" 2>/dev/null
+}
+
+# ---- argument parsing -------------------------------------------------------
+TARGET=""
+MAX_BYTES=65536
+JSON_OUT=0
+LIST_ONLY=0
+NO_IGNORE=0
+INCLUDES=()
+EXCLUDES=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model)    CTXC_MODEL="${2:?}"; shift 2 ;;
+    --budget)   CTXC_BUDGET="${2:?}"; shift 2 ;;
+    --max-bytes) MAX_BYTES="${2:?}"; shift 2 ;;
+    --include)  INCLUDES+=("$2"); shift 2 ;;
+    --exclude)  EXCLUDES+=("$2"); shift 2 ;;
+    --json)     JSON_OUT=1; shift ;;
+    --list)     LIST_ONLY=1; shift ;;
+    --no-ignore) NO_IGNORE=1; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    -*)         die "unknown flag: $1" ;;
+    *)          TARGET="$1"; shift ;;
+  esac
+done
+TARGET="${TARGET:-.}"
+[ -d "$TARGET" ] || die "not a directory: $TARGET"
+CTXC_ROOT=$(cd "$TARGET" && pwd)
+
+# ---- collect candidates -----------------------------------------------------
+declare -a FILES=()
+if [ -d "$CTXC_ROOT/.git" ] && [ "$NO_IGNORE" -eq 0 ]; then
+  while IFS= read -r f; do
+    path_included "$f" && FILES+=("$f")
+  done < <(git -C "$CTXC_ROOT" ls-files --cached --others --exclude-standard)
+else
+  while IFS= read -r f; do
+    path_included "$f" && FILES+=("$f")
+  done < <(find "$CTXC_ROOT" -type f)
+  NO_IGNORE=1
+  [ -d "$CTXC_ROOT/.git" ] && say "warn: no git, .gitignore skipped"
+fi
+
+[ ${#FILES[@]} -gt 0 ] || die "no packable files under $CTXC_ROOT"
+
+# ---- include/exclude filters -------------------------------------------------
+match_any() {
+  local p="$1"; shift
+  local pat
+  for pat in "$@"; do
+    case "$p" in
+      $pat) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+FILTERED=()
+for f in "${FILES[@]}"; do
+  rel="${f#"$CTXC_ROOT"/}"
+  match_any "$rel" "${EXCLUDES[@]+"${EXCLUDES[@]}"}" && continue
+  if [ ${#INCLUDES[@]} -gt 0 ]; then
+    match_any "$rel" "${INCLUDES[@]}" || continue
+  fi
+  FILTERED+=("$rel")
+done
+[ ${#FILTERED[@]} -gt 0 ] || die "include/exclude filters removed every file"
+
+# ---- token budgeting ----------------------------------------------------------
+declare -a PACKED=()
+total=0
+for f in "${FILTERED[@]}"; do
+  [ "$(wc -c <"$CTXC_ROOT/$f" | tr -d ' ')" -le "$MAX_BYTES" ] || continue
+  t=$(est_tokens "$CTXC_ROOT/$f")
+  if [ "$total" -eq 0 ]; then
+    PACKED+=("$f"); total=$t
+  elif [ $((total + t)) -le "$CTXC_BUDGET" ]; then
+    PACKED+=("$f"); total=$((total + t))
+  else
+    say "note: budget reached, skipped $f"
+  fi
+done
+[ ${#PACKED[@]} -gt 0 ] || die "budget too small to pack anything"
+
+# ---- emit ---------------------------------------------------------------------
+if [ "$LIST_ONLY" -eq 1 ]; then
+  printf '%s\n' "${PACKED[@]}"
+  exit 0
+fi
+
+manifest=$(printf '{"tool":"ctxc","version":"%s","model":"%s","budget":%s,"files":%s,"est_tokens":%s}' \
+  "$CTXC_VERSION" "$CTXC_MODEL" "$CTXC_BUDGET" ${#PACKED[@]} "$total")
+
+if [ "$JSON_OUT" -eq 1 ]; then
+  printf '%s\n' "$manifest"
+  exit 0
+fi
+
+printf '%s\n' "$manifest"
+for f in "${PACKED[@]}"; do
+  printf '\n--- %s ---\n' "$f"
+  cat "$CTXC_ROOT/$f"
+done
