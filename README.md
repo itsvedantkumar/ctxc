@@ -30,7 +30,11 @@ stays clean. `--json` emits the manifest alone for scripting:
 ## How the budget works
 
 Files are estimated at 4.0 chars per token — crude, but deterministic, and for code-heavy
-text it lands within ~15% of the real tokenizer. Files are packed in git's ordering, each
+text it lands within ~15% of the real tokenizer. **Dense minified JSON breaks that
+calibration**: minified `locales.json`-style content runs closer to 2.9–3.0 chars/token,
+so a pack whose manifest says 8k can really land at 11k+ on a model that counts honestly.
+Leave headroom for those trees; the estimator stays crude on purpose — a tokenizer in bash
+is a problem I don't want to own. Files are packed in git's ordering, each
 one only if it still fits the budget; the first file that doesn't fit emits a note to
 stderr and everything after it is skipped too. If nothing fits at all, ctxc refuses with
 exit 2 rather than emitting an empty pack — an empty pack is how you quietly blow an

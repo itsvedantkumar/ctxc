@@ -28,6 +28,8 @@ usage: ctxc [path] [options]
 
 The pack is written to stdout; everything else goes to stderr.
 Model context budgets: qwen2.5-coder:7b 32k, llama3.1:8b 128k, phi3:mini 4k.
+The estimate is crude on purpose: dense minified JSON runs ~2.9-3.0 chars/token
+against the 4.0 default, so leave headroom when packing locales/assets trees.
 EOF
 }
 
